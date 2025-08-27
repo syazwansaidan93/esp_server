@@ -68,7 +68,7 @@ The indoor temperature sensor URL is currently hardcoded. You can change it in t
 ```go
 const (
     // ...
-    indoorTempURL = "[http://192.168.1.4/i_temp](http://192.168.1.4/i_temp)"
+    indoorTempURL = "http://192.168.1.4/i_temp"
 )
 ```
 
