@@ -342,7 +342,7 @@ func startRelayPollingJob() {
 	var lastState string
 
 	for range ticker.C {
-		log.Println("Polling ESP32 for current relay state...")
+		//log.Println("Polling ESP32 for current relay state...")
 		data, err := sendSerialCommand("r")
 		if err != nil {
 			log.Printf("Failed to get relay status during polling: %v", err)
