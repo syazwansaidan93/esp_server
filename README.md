@@ -10,6 +10,7 @@ This application is a backend service written in Go for monitoring an ESP32C3-ba
   - **Solar Power:** Records solar panel voltage, current, and power at 15-minute intervals, but **only between 7:15 AM and 7:30 PM**.
 - **Local Database:** Uses SQLite to store all sensor readings and relay state changes.
 - **Scheduled Pruning:** Automatically deletes data older than 48 hours every 24 hours to manage disk space.
+- **Relay State Logging:** A background job **polls the ESP32 every 5 seconds** and automatically records a new entry in the database whenever the relay's state changes. This ensures a complete history of all changes, regardless of how they were initiated.
 - **HTTP API:** Provides various endpoints to fetch the latest sensor values, get historical data, and control a connected relay.
 
 ## Prerequisites
@@ -68,7 +69,7 @@ The indoor temperature sensor URL is currently hardcoded. You can change it in t
 ```go
 const (
     // ...
-    indoorTempURL = "http://192.168.1.4/i_temp"
+    indoorTempURL = "[http://192.168.1.4/i_temp](http://192.168.1.4/i_temp)"
 )
 ```
 
