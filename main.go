@@ -43,6 +43,13 @@ type RelayHistory struct {
 	State     string `json:"state"`
 }
 
+type SolarDataHistory struct {
+	Timestamp string `json:"timestamp"`
+	VoltageV  float64 `json:"voltage_V"`
+	CurrentMA float64 `json:"current_mA"`
+	PowerMW   float64 `json:"power_mW"`
+}
+
 type StatusResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
@@ -527,8 +534,6 @@ func handle24hIndoorTemp(w http.ResponseWriter, r *http.Request) {
 }
 
 func handle24hSolar(w http.ResponseWriter, r *http.Request) {
-	// The original error was caused by SELECT * returning more columns than expected.
-	// We fix this by explicitly selecting the columns needed.
 	rows, err := db.Query("SELECT timestamp, voltage_V, current_mA, power_mW FROM solar_readings WHERE timestamp >= ? ORDER BY timestamp", time.Now().Add(-24*time.Hour).UTC().Format(time.RFC3339))
 	if err != nil {
 		http.Error(w, "Failed to query database", http.StatusInternalServerError)
@@ -536,12 +541,10 @@ func handle24hSolar(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var results []SensorData
+	var results []SolarDataHistory
 	for rows.Next() {
-		var timestamp string
-		var data SensorData
-		// The Scan() arguments now correctly match the selected columns.
-		if err := rows.Scan(&timestamp, &data.VoltageV, &data.CurrentMA, &data.PowerMW); err != nil {
+		var data SolarDataHistory
+		if err := rows.Scan(&data.Timestamp, &data.VoltageV, &data.CurrentMA, &data.PowerMW); err != nil {
 			log.Printf("Error scanning row: %v\n", err)
 			continue
 		}
