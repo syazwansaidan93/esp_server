@@ -82,6 +82,7 @@ func main() {
 	// 3. Start background jobs using goroutines and tickers
 	go startDataCollectionJob()
 	go startPruningJob()
+	go startRelayPollingJob() // New job to poll and record relay state changes
 
 	// 4. Register HTTP handlers
 	http.HandleFunc("/r/on", handleRelayOn)
@@ -332,6 +333,38 @@ func startPruningJob() {
 	}
 }
 
+// startRelayPollingJob polls the ESP32 for the current relay state every 5 seconds and
+// records the state in the database if it has changed.
+func startRelayPollingJob() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastState string
+
+	for range ticker.C {
+		log.Println("Polling ESP32 for current relay state...")
+		data, err := sendSerialCommand("r")
+		if err != nil {
+			log.Printf("Failed to get relay status during polling: %v", err)
+			continue
+		}
+		
+		currentState, ok := data["value"].(string)
+		if !ok {
+			log.Printf("Invalid response from ESP32 during polling: %v", data)
+			continue
+		}
+		
+		// If the state has changed from the last known state, record it.
+		if currentState != lastState {
+			log.Printf("Relay state changed from '%s' to '%s'. Recording to DB.", lastState, currentState)
+			recordRelayState(currentState)
+			lastState = currentState
+		}
+	}
+}
+
+
 // --- HTTP Handlers ---
 
 func handleRelayOn(w http.ResponseWriter, r *http.Request) {
@@ -339,13 +372,21 @@ func handleRelayOn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Println("Attempting to turn relay ON...")
 	data, err := sendSerialCommand("r1")
-	if err != nil || data["value"] != "ON" {
-		http.Error(w, "Failed to turn relay ON", http.StatusInternalServerError)
+	if err != nil {
+		log.Printf("Failed to get response from ESP32: %v", err)
+		http.Error(w, "Failed to turn relay ON due to communication error", http.StatusInternalServerError)
 		return
 	}
-	recordRelayState("ON")
+	if data["value"] != "ON" {
+		log.Printf("ESP32 response was not 'ON': %v", data)
+		http.Error(w, "Failed to turn relay ON. Unexpected response from device.", http.StatusInternalServerError)
+		return
+	}
+	// recordRelayState("ON") // This is now handled by the polling job
 	json.NewEncoder(w).Encode(StatusResponse{Status: "success", Message: "Relay turned ON"})
+	log.Println("Relay ON command successful.")
 }
 
 func handleRelayOff(w http.ResponseWriter, r *http.Request) {
@@ -353,13 +394,21 @@ func handleRelayOff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Println("Attempting to turn relay OFF...")
 	data, err := sendSerialCommand("r0")
-	if err != nil || data["value"] != "OFF" {
-		http.Error(w, "Failed to turn relay OFF", http.StatusInternalServerError)
+	if err != nil {
+		log.Printf("Failed to get response from ESP32: %v", err)
+		http.Error(w, "Failed to turn relay OFF due to communication error", http.StatusInternalServerError)
 		return
 	}
-	recordRelayState("OFF")
+	if data["value"] != "OFF" {
+		log.Printf("ESP32 response was not 'OFF': %v", data)
+		http.Error(w, "Failed to turn relay OFF. Unexpected response from device.", http.StatusInternalServerError)
+		return
+	}
+	// recordRelayState("OFF") // This is now handled by the polling job
 	json.NewEncoder(w).Encode(StatusResponse{Status: "success", Message: "Relay turned OFF"})
+	log.Println("Relay OFF command successful.")
 }
 
 func handleRelayStatus(w http.ResponseWriter, r *http.Request) {
