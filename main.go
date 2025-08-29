@@ -172,6 +172,10 @@ func sendSerialCommand(command string) (map[string]interface{}, error) {
 	serialMutex.Lock()
 	defer serialMutex.Unlock()
 
+	if serialPort == nil {
+		return nil, fmt.Errorf("serial port is not connected")
+	}
+
 	// Clear the input buffer to prevent reading old data
 	serialPort.ResetOutputBuffer()
 	serialPort.ResetInputBuffer()
@@ -231,6 +235,29 @@ func recordRelayState(state string) {
 		log.Printf("Error recording relay state: %v\n", err)
 	} else {
 		log.Printf("Relay state change recorded: %s\n", state)
+	}
+}
+
+// reconnectSerial attempts to reconnect to the serial port in a loop.
+func reconnectSerial() {
+	serialMutex.Lock()
+	defer serialMutex.Unlock()
+
+	if serialPort != nil {
+		serialPort.Close()
+		serialPort = nil
+	}
+
+	log.Println("Attempting to reconnect to the serial port...")
+	for {
+		newPort, err := connectToSerial()
+		if err == nil {
+			serialPort = newPort
+			log.Println("Reconnected to serial port successfully.")
+			return
+		}
+		log.Printf("Reconnection failed: %v. Retrying in 5 seconds...", err)
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -342,10 +369,10 @@ func startRelayPollingJob() {
 	var lastState string
 
 	for range ticker.C {
-		//log.Println("Polling ESP32 for current relay state...")
 		data, err := sendSerialCommand("r")
 		if err != nil {
 			log.Printf("Failed to get relay status during polling: %v", err)
+			reconnectSerial()
 			continue
 		}
 		
