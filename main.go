@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
-	"go.bug.st/serial"              // Serial communication library
+	_ "github.com/mattn/go-sqlite3"
+	"go.bug.st/serial"
 )
 
 const (
@@ -22,7 +23,6 @@ const (
 	indoorTempURL = "http://192.168.1.4/i_temp"
 )
 
-// Data models for JSON responses
 type SensorData struct {
 	VoltageV  float64 `json:"voltage_V,omitempty"`
 	CurrentMA float64 `json:"current_mA,omitempty"`
@@ -44,10 +44,14 @@ type RelayHistory struct {
 }
 
 type SolarDataHistory struct {
-	Timestamp string `json:"timestamp"`
+	Timestamp string  `json:"timestamp"`
 	VoltageV  float64 `json:"voltage_V"`
 	CurrentMA float64 `json:"current_mA"`
 	PowerMW   float64 `json:"power_mW"`
+}
+
+type UptimeData struct {
+	UptimeMS float64 `json:"uptime_ms"`
 }
 
 type StatusResponse struct {
@@ -55,60 +59,55 @@ type StatusResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Global variables for serial connection and database
 var (
-	serialPort serial.Port
 	serialMutex sync.Mutex
-	db         *sql.DB
+	db          *sql.DB
+
+	commandChan      = make(chan string)
+	responseChan     = make(chan map[string]interface{})
+	relayEventChan   = make(chan string)
+	serialConnection serial.Port
 )
 
 func main() {
 	log.Println("Starting Go ESP32 Monitoring App...")
 
-	// 1. Setup the database
 	if err := setupDatabase(); err != nil {
 		log.Fatalf("Failed to set up database: %v", err)
 	}
 	defer db.Close()
 
-	// 2. Connect to the serial port
 	var err error
-	serialPort, err = connectToSerial()
+	serialConnection, err = connectToSerial()
 	if err != nil {
 		log.Fatalf("Failed to connect to serial port: %v", err)
 	}
-	defer serialPort.Close()
+	defer serialConnection.Close()
 
-	// 3. Start background jobs using goroutines and tickers
+	go serialManager()
+
 	go startDataCollectionJob()
 	go startPruningJob()
-	go startRelayPollingJob() // New job to poll and record relay state changes
+	go startRelayEventWatcher()
 
-	// 4. Register HTTP handlers
-	http.HandleFunc("/r/on", handleRelayOn)
-	http.HandleFunc("/r/off", handleRelayOff)
 	http.HandleFunc("/r/latest", handleRelayStatus)
 	http.HandleFunc("/o/latest", handleOutdoorTemp)
 	http.HandleFunc("/i/latest", handleIndoorTemp)
 	http.HandleFunc("/s/latest", handleSolarPower)
+	http.HandleFunc("/u/latest", handleUptime)
 	http.HandleFunc("/t/latest", handleLatestTemps)
 	http.HandleFunc("/t/24", handle24hTemps)
 	http.HandleFunc("/r/24", handle24hRelayHistory)
 	http.HandleFunc("/o/24", handle24hOutdoorTemp)
 	http.HandleFunc("/i/24", handle24hIndoorTemp)
 	http.HandleFunc("/s/24", handle24hSolar)
-	// Additional handlers for settings endpoints
-	// For simplicity, these handlers are not implemented here but the structure is the same.
-	// http.HandleFunc("/settings", handleGetSettings)
 
-	// 5. Start the web server
 	log.Println("Server listening on http://0.0.0.0:5000")
 	if err := http.ListenAndServe("0.0.0.0:5000", nil); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
 
-// setupDatabase initializes the SQLite database and creates tables if they don't exist.
 func setupDatabase() error {
 	var err error
 	db, err = sql.Open("sqlite3", dbFile)
@@ -137,7 +136,6 @@ func setupDatabase() error {
 	return err
 }
 
-// connectToSerial auto-detects and connects to the ESP32 serial port.
 func connectToSerial() (serial.Port, error) {
 	ports, err := serial.GetPortsList()
 	if err != nil {
@@ -149,7 +147,7 @@ func connectToSerial() (serial.Port, error) {
 
 	for _, portName := range ports {
 		if _, err := os.Stat(portName); err == nil && (os.IsPermission(err) || os.IsNotExist(err)) {
-			continue // Skip ports without read/write permissions or non-existent ones
+			continue
 		}
 
 		log.Printf("Found potential serial port: %s\n", portName)
@@ -158,7 +156,6 @@ func connectToSerial() (serial.Port, error) {
 			log.Printf("Failed to open port %s: %v\n", portName, err)
 			continue
 		}
-		// A short sleep to allow the ESP32 to reset
 		time.Sleep(2 * time.Second)
 		log.Printf("Successfully connected to serial port %s\n", portName)
 		return port, nil
@@ -167,42 +164,49 @@ func connectToSerial() (serial.Port, error) {
 	return nil, fmt.Errorf("no suitable serial port found")
 }
 
-// sendSerialCommand sends a command to the ESP32 and waits for a response.
+func serialManager() {
+	scanner := bufio.NewScanner(serialConnection)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var data map[string]interface{}
+		err := json.Unmarshal([]byte(line), &data)
+		if err != nil {
+			log.Printf("Non-JSON serial message received: %s\n", line)
+			continue
+		}
+
+		if _, ok := data["relay_event"]; ok {
+			relayEventChan <- data["relay_event"].(string)
+		} else {
+			responseChan <- data
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error reading from serial port: %v\n", err)
+	}
+}
+
 func sendSerialCommand(command string) (map[string]interface{}, error) {
 	serialMutex.Lock()
 	defer serialMutex.Unlock()
 
-	if serialPort == nil {
-		return nil, fmt.Errorf("serial port is not connected")
-	}
+	serialConnection.ResetOutputBuffer()
+	serialConnection.ResetInputBuffer()
+	serialConnection.SetReadTimeout(serialTimeout)
 
-	// Clear the input buffer to prevent reading old data
-	serialPort.ResetOutputBuffer()
-	serialPort.ResetInputBuffer()
-
-	// Write the command to the serial port
-	_, err := serialPort.Write([]byte(command + "\n"))
+	_, err := serialConnection.Write([]byte(command + "\n"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to write to serial port: %w", err)
 	}
 
-	// Read a line from the serial port
-	reader := io.Reader(serialPort)
-	decoder := json.NewDecoder(reader)
-
-	// Set a deadline for reading
-	serialPort.SetReadTimeout(serialTimeout)
-
-	var data map[string]interface{}
-	err = decoder.Decode(&data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode JSON response: %w", err)
+	select {
+	case data := <-responseChan:
+		return data, nil
+	case <-time.After(serialTimeout):
+		return nil, fmt.Errorf("serial response timeout")
 	}
-
-	return data, nil
 }
 
-// fetchIndoorTemp asynchronously fetches the indoor temperature from a local URL.
 func fetchIndoorTemp() (float64, error) {
 	resp, err := http.Get(indoorTempURL)
 	if err != nil {
@@ -227,7 +231,6 @@ func fetchIndoorTemp() (float64, error) {
 	return temp, nil
 }
 
-// recordRelayState logs a relay state change in the database.
 func recordRelayState(state string) {
 	query := "INSERT OR REPLACE INTO relay_state_changes (timestamp, state) VALUES (?, ?)"
 	_, err := db.Exec(query, time.Now().UTC().Format(time.RFC3339), state)
@@ -238,30 +241,6 @@ func recordRelayState(state string) {
 	}
 }
 
-// reconnectSerial attempts to reconnect to the serial port in a loop.
-func reconnectSerial() {
-	serialMutex.Lock()
-	defer serialMutex.Unlock()
-
-	if serialPort != nil {
-		serialPort.Close()
-		serialPort = nil
-	}
-
-	log.Println("Attempting to reconnect to the serial port...")
-	for {
-		newPort, err := connectToSerial()
-		if err == nil {
-			serialPort = newPort
-			log.Println("Reconnected to serial port successfully.")
-			return
-		}
-		log.Printf("Reconnection failed: %v. Retrying in 5 seconds...", err)
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// startDataCollectionJob is a background job that collects and stores sensor data every 15 minutes.
 func startDataCollectionJob() {
 	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
@@ -270,7 +249,6 @@ func startDataCollectionJob() {
 		log.Println("Running scheduled data collection job...")
 		timestamp := time.Now().UTC().Format(time.RFC3339)
 
-		// Fetch outdoor temperature
 		outdoorData, err := sendSerialCommand("o")
 		var outdoorTemp sql.NullFloat64
 		if err == nil {
@@ -282,7 +260,6 @@ func startDataCollectionJob() {
 			log.Println("Failed to get outdoor temp:", err)
 		}
 
-		// Fetch indoor temperature
 		indoorTemp, err := fetchIndoorTemp()
 		var indoor sql.NullFloat64
 		if err == nil {
@@ -292,7 +269,6 @@ func startDataCollectionJob() {
 			log.Println("Failed to get indoor temp:", err)
 		}
 
-		// Store temperature data
 		queryTemp := "INSERT OR REPLACE INTO temperature_readings (timestamp, outdoor_temp_C, indoor_temp_C) VALUES (?, ?, ?)"
 		_, err = db.Exec(queryTemp, timestamp, outdoorTemp, indoor)
 		if err != nil {
@@ -301,24 +277,25 @@ func startDataCollectionJob() {
 			log.Println("Temperature data stored successfully.")
 		}
 
-		// Check if the current time is within the solar recording range (7:15 AM - 7:30 PM)
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 7, 15, 0, 0, now.Location())
 		endOfDay := time.Date(now.Year(), now.Month(), now.Day(), 19, 30, 0, 0, now.Location())
 
 		if now.After(startOfDay) && now.Before(endOfDay) {
-			// Fetch solar data
 			solarData, err := sendSerialCommand("s")
 			if err == nil {
 				var voltage, current, power sql.NullFloat64
 				if v, ok := solarData["voltage_V"].(float64); ok {
-					voltage.Float64 = v; voltage.Valid = true
+					voltage.Float64 = v
+					voltage.Valid = true
 				}
 				if c, ok := solarData["current_mA"].(float64); ok {
-					current.Float64 = c; current.Valid = true
+					current.Float64 = c
+					current.Valid = true
 				}
 				if p, ok := solarData["power_mW"].(float64); ok {
-					power.Float64 = p; power.Valid = true
+					power.Float64 = p
+					power.Valid = true
 				}
 				querySolar := "INSERT OR REPLACE INTO solar_readings (timestamp, voltage_V, current_mA, power_mW) VALUES (?, ?, ?, ?)"
 				_, err = db.Exec(querySolar, timestamp, voltage, current, power)
@@ -336,7 +313,6 @@ func startDataCollectionJob() {
 	}
 }
 
-// startPruningJob is a background job to prune old data every 24 hours.
 func startPruningJob() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
@@ -360,82 +336,11 @@ func startPruningJob() {
 	}
 }
 
-// startRelayPollingJob polls the ESP32 for the current relay state every 5 seconds and
-// records the state in the database if it has changed.
-func startRelayPollingJob() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	var lastState string
-
-	for range ticker.C {
-		data, err := sendSerialCommand("r")
-		if err != nil {
-			log.Printf("Failed to get relay status during polling: %v", err)
-			reconnectSerial()
-			continue
-		}
-		
-		currentState, ok := data["value"].(string)
-		if !ok {
-			log.Printf("Invalid response from ESP32 during polling: %v", data)
-			continue
-		}
-		
-		// If the state has changed from the last known state, record it.
-		if currentState != lastState {
-			log.Printf("Relay state changed from '%s' to '%s'. Recording to DB.", lastState, currentState)
-			recordRelayState(currentState)
-			lastState = currentState
-		}
+func startRelayEventWatcher() {
+	for state := range relayEventChan {
+		log.Printf("Relay state changed to '%s'. Recording to DB.\n", state)
+		recordRelayState(state)
 	}
-}
-
-
-// --- HTTP Handlers ---
-
-func handleRelayOn(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	log.Println("Attempting to turn relay ON...")
-	data, err := sendSerialCommand("r1")
-	if err != nil {
-		log.Printf("Failed to get response from ESP32: %v", err)
-		http.Error(w, "Failed to turn relay ON due to communication error", http.StatusInternalServerError)
-		return
-	}
-	if data["value"] != "ON" {
-		log.Printf("ESP32 response was not 'ON': %v", data)
-		http.Error(w, "Failed to turn relay ON. Unexpected response from device.", http.StatusInternalServerError)
-		return
-	}
-	// recordRelayState("ON") // This is now handled by the polling job
-	json.NewEncoder(w).Encode(StatusResponse{Status: "success", Message: "Relay turned ON"})
-	log.Println("Relay ON command successful.")
-}
-
-func handleRelayOff(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	log.Println("Attempting to turn relay OFF...")
-	data, err := sendSerialCommand("r0")
-	if err != nil {
-		log.Printf("Failed to get response from ESP32: %v", err)
-		http.Error(w, "Failed to turn relay OFF due to communication error", http.StatusInternalServerError)
-		return
-	}
-	if data["value"] != "OFF" {
-		log.Printf("ESP32 response was not 'OFF': %v", data)
-		http.Error(w, "Failed to turn relay OFF. Unexpected response from device.", http.StatusInternalServerError)
-		return
-	}
-	// recordRelayState("OFF") // This is now handled by the polling job
-	json.NewEncoder(w).Encode(StatusResponse{Status: "success", Message: "Relay turned OFF"})
-	log.Println("Relay OFF command successful.")
 }
 
 func handleRelayStatus(w http.ResponseWriter, r *http.Request) {
@@ -491,10 +396,24 @@ func handleSolarPower(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(SensorData{VoltageV: voltage, CurrentMA: current, PowerMW: power})
 }
 
+func handleUptime(w http.ResponseWriter, r *http.Request) {
+	data, err := sendSerialCommand("u")
+	if err != nil {
+		http.Error(w, "Failed to get uptime", http.StatusInternalServerError)
+		return
+	}
+	uptime, ok := data["value_ms"].(float64)
+	if !ok {
+		http.Error(w, "Invalid response from device", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(UptimeData{UptimeMS: uptime})
+}
+
 func handleLatestTemps(w http.ResponseWriter, r *http.Request) {
 	outdoorData, errO := sendSerialCommand("o")
 	indoorTemp, errI := fetchIndoorTemp()
-	
+
 	tempData := TemperatureData{}
 	if errO == nil {
 		if oTemp, ok := outdoorData["value"].(float64); ok {
@@ -530,8 +449,12 @@ func handle24hTemps(w http.ResponseWriter, r *http.Request) {
 		}
 		record := make(map[string]interface{})
 		record["timestamp"] = timestamp
-		if outdoor.Valid { record["outdoor_temp_C"] = outdoor.Float64 }
-		if indoor.Valid { record["indoor_temp_C"] = indoor.Float64 }
+		if outdoor.Valid {
+			record["outdoor_temp_C"] = outdoor.Float64
+		}
+		if indoor.Valid {
+			record["indoor_temp_C"] = indoor.Float64
+		}
 		results = append(results, record)
 	}
 	json.NewEncoder(w).Encode(results)
