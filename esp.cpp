@@ -21,7 +21,6 @@ float voltage_high_on_threshold_V = 13.2;
 float power_on_threshold_mW = 2000.0;
 float power_off_threshold_mW = 500.0;
 unsigned long debounce_delay_ms = 60000;
-bool auto_relay_mode = true;
 unsigned long debounce_timer_start = 0;
 int last_stable_state = LOW;
 
@@ -86,8 +85,15 @@ void printRelayStatus() {
   }
 }
 
+void printUptime() {
+  unsigned long uptime_ms = millis();
+  Serial.print("{ \"sensor\": \"uptime\", \"value_ms\": ");
+  Serial.print(uptime_ms);
+  Serial.println(" }");
+}
+
 void checkAndControlRelay() {
-  if (!ina219_found || !auto_relay_mode) {
+  if (!ina219_found) {
     return;
   }
   
@@ -116,34 +122,14 @@ void checkAndControlRelay() {
       debounce_timer_start = 0;
       
       if (desired_state == HIGH) {
-        Serial.println("{\"relay_event\": \"auto_on\", \"power_mW\": " + String(current_power_mW) + "}");
+        Serial.println("{\"relay_event\": \"on\"}");
       } else {
-        Serial.println("{\"relay_event\": \"auto_off\", \"power_mW\": " + String(current_power_mW) + ", \"voltage_V\": " + String(current_voltage_V) + "}");
+        Serial.println("{\"relay_event\": \"off\"}");
       }
     }
   } else {
     debounce_timer_start = 0;
   }
-}
-
-void printRelaySettings() {
-  Serial.print("{ \"relay_settings\": { \"mode\": \"");
-  if (auto_relay_mode) {
-    Serial.print("auto");
-  } else {
-    Serial.print("manual");
-  }
-  Serial.print("\", \"power_on_threshold_mW\": ");
-  Serial.print(power_on_threshold_mW);
-  Serial.print(", \"power_off_threshold_mW\": ");
-  Serial.print(power_off_threshold_mW);
-  Serial.print(", \"voltage_low_cutoff_V\": ");
-  Serial.print(voltage_low_cutoff_V);
-  Serial.print(", \"voltage_high_on_threshold_V\": ");
-  Serial.print(voltage_high_on_threshold_V);
-  Serial.print(", \"debounce_delay_ms\": ");
-  Serial.print(debounce_delay_ms);
-  Serial.println(" } }");
 }
 
 void setup() {
@@ -176,9 +162,7 @@ void setup() {
 }
 
 void loop() {
-  if (auto_relay_mode) {
-    checkAndControlRelay();
-  }
+  checkAndControlRelay();
   
   if (Serial.available() > 0) {
     String command = Serial.readStringUntil('\n');
@@ -190,54 +174,8 @@ void loop() {
       printSolarData();
     } else if (command == "r") {
       printRelayStatus();
-    } else if (command == "auto") {
-      auto_relay_mode = true;
-      Serial.println("{\"mode\": \"auto\", \"status\": \"enabled\"}");
-    } else if (command == "manual") {
-      auto_relay_mode = false;
-      Serial.println("{\"mode\": \"manual\", \"status\": \"enabled\"}");
-    } else if (command.startsWith("set_power_on_mW")) {
-      float new_threshold = command.substring(command.indexOf(' ') + 1).toFloat();
-      if (new_threshold > 0) {
-        power_on_threshold_mW = new_threshold;
-        Serial.println("{\"command\": \"set_power_on_mW\", \"value\": " + String(power_on_threshold_mW) + "}");
-      } else {
-        Serial.println("{\"command\": \"set_power_on_mW\", \"status\": \"error\", \"message\": \"invalid value\"}");
-      }
-    } else if (command.startsWith("set_power_off_mW")) {
-      float new_threshold = command.substring(command.indexOf(' ') + 1).toFloat();
-      if (new_threshold > 0) {
-        power_off_threshold_mW = new_threshold;
-        Serial.println("{\"command\": \"set_power_off_mW\", \"value\": " + String(power_off_threshold_mW) + "}");
-      } else {
-        Serial.println("{\"command\": \"set_power_off_mW\", \"status\": \"error\", \"message\": \"invalid value\"}");
-      }
-    } else if (command.startsWith("set_voltage_cutoff_V")) {
-      float new_threshold = command.substring(command.indexOf(' ') + 1).toFloat();
-      if (new_threshold > 0) {
-        voltage_low_cutoff_V = new_threshold;
-        Serial.println("{\"command\": \"set_voltage_cutoff_V\", \"value\": " + String(voltage_low_cutoff_V) + "}");
-      } else {
-        Serial.println("{\"command\": \"set_voltage_cutoff_V\", \"status\": \"error\", \"message\": \"invalid value\"}");
-      }
-    } else if (command.startsWith("set_voltage_high_on_V")) {
-      float new_threshold = command.substring(command.indexOf(' ') + 1).toFloat();
-      if (new_threshold > 0) {
-        voltage_high_on_threshold_V = new_threshold;
-        Serial.println("{\"command\": \"set_voltage_high_on_V\", \"value\": " + String(voltage_high_on_threshold_V) + "}");
-      } else {
-        Serial.println("{\"command\": \"set_voltage_high_on_V\", \"status\": \"error\", \"message\": \"invalid value\"}");
-      }
-    } else if (command.startsWith("set_debounce_ms")) {
-      unsigned long new_delay = command.substring(command.indexOf(' ') + 1).toFloat();
-      if (new_delay > 0) {
-        debounce_delay_ms = new_delay;
-        Serial.println("{\"command\": \"set_debounce_ms\", \"value\": " + String(debounce_delay_ms) + "}");
-      } else {
-        Serial.println("{\"command\": \"set_debounce_ms\", \"status\": \"error\", \"message\": \"invalid value\"}");
-      }
-    } else if (command == "get_settings") {
-      printRelaySettings();
+    } else if (command == "u") {
+      printUptime();
     } else {
       Serial.println("Invalid command.");
     }
