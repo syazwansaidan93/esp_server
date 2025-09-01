@@ -67,6 +67,7 @@ var (
 	responseChan     = make(chan map[string]interface{})
 	relayEventChan   = make(chan string)
 	serialConnection serial.Port
+	serialDisconnectChan = make(chan struct{})
 )
 
 func main() {
@@ -77,14 +78,7 @@ func main() {
 	}
 	defer db.Close()
 
-	var err error
-	serialConnection, err = connectToSerial()
-	if err != nil {
-		log.Fatalf("Failed to connect to serial port: %v", err)
-	}
-	defer serialConnection.Close()
-
-	go serialManager()
+	go startSerialConnectionManager()
 
 	go startDataCollectionJob()
 	go startPruningJob()
@@ -136,6 +130,31 @@ func setupDatabase() error {
 	return err
 }
 
+func startSerialConnectionManager() {
+	for {
+		log.Println("Attempting to connect to a serial port...")
+		port, err := connectToSerial()
+		if err != nil {
+			log.Printf("Failed to connect to serial port: %v. Retrying in 5 seconds...", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		serialMutex.Lock()
+		serialConnection = port
+		serialMutex.Unlock()
+		log.Println("Serial port connected. Starting serial reader...")
+		go serialManager()
+		
+		// Wait here until the serial manager signals a disconnection
+		<-serialDisconnectChan
+		log.Println("Serial port disconnected. Attempting to reconnect...")
+		serialMutex.Lock()
+		serialConnection.Close()
+		serialConnection = nil
+		serialMutex.Unlock()
+	}
+}
+
 func connectToSerial() (serial.Port, error) {
 	ports, err := serial.GetPortsList()
 	if err != nil {
@@ -165,6 +184,11 @@ func connectToSerial() (serial.Port, error) {
 }
 
 func serialManager() {
+	// Signal a disconnection when this goroutine exits
+	defer func() {
+		close(serialDisconnectChan)
+	}()
+
 	scanner := bufio.NewScanner(serialConnection)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -189,6 +213,10 @@ func serialManager() {
 func sendSerialCommand(command string) (map[string]interface{}, error) {
 	serialMutex.Lock()
 	defer serialMutex.Unlock()
+
+	if serialConnection == nil {
+		return nil, fmt.Errorf("serial port not connected")
+	}
 
 	serialConnection.ResetOutputBuffer()
 	serialConnection.ResetInputBuffer()
