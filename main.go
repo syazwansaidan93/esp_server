@@ -60,13 +60,12 @@ type StatusResponse struct {
 }
 
 var (
-	serialMutex sync.Mutex
-	db          *sql.DB
-
-	commandChan      = make(chan string)
-	responseChan     = make(chan map[string]interface{})
-	relayEventChan   = make(chan string)
-	serialConnection serial.Port
+	serialMutex          sync.Mutex
+	db                   *sql.DB
+	commandChan          = make(chan string)
+	responseChan         = make(chan map[string]interface{})
+	relayEventChan       = make(chan string)
+	serialConnection     serial.Port
 	serialDisconnectChan = make(chan struct{})
 )
 
@@ -79,7 +78,6 @@ func main() {
 	defer db.Close()
 
 	go startSerialConnectionManager()
-
 	go startDataCollectionJob()
 	go startPruningJob()
 	go startRelayEventWatcher()
@@ -144,8 +142,7 @@ func startSerialConnectionManager() {
 		serialMutex.Unlock()
 		log.Println("Serial port connected. Starting serial reader...")
 		go serialManager()
-		
-		// Wait here until the serial manager signals a disconnection
+
 		<-serialDisconnectChan
 		log.Println("Serial port disconnected. Attempting to reconnect...")
 		serialMutex.Lock()
@@ -184,7 +181,6 @@ func connectToSerial() (serial.Port, error) {
 }
 
 func serialManager() {
-	// Signal a disconnection when this goroutine exits
 	defer func() {
 		close(serialDisconnectChan)
 	}()
@@ -568,14 +564,26 @@ func handle24hSolar(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var results []SolarDataHistory
+	var results []map[string]interface{}
 	for rows.Next() {
-		var data SolarDataHistory
-		if err := rows.Scan(&data.Timestamp, &data.VoltageV, &data.CurrentMA, &data.PowerMW); err != nil {
+		var timestamp string
+		var voltage, current, power sql.NullFloat64
+		if err := rows.Scan(&timestamp, &voltage, &current, &power); err != nil {
 			log.Printf("Error scanning row: %v\n", err)
 			continue
 		}
-		results = append(results, data)
+		record := make(map[string]interface{})
+		record["timestamp"] = timestamp
+		if voltage.Valid {
+			record["voltage_V"] = voltage.Float64
+		}
+		if current.Valid {
+			record["current_mA"] = current.Float64
+		}
+		if power.Valid {
+			record["power_mW"] = power.Float64
+		}
+		results = append(results, record)
 	}
 	json.NewEncoder(w).Encode(results)
 }
