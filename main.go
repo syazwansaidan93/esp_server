@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	baudRate      = 115200
+	baudRate = 115200
 	serialTimeout = 5 * time.Second
-	dbFile        = "sensor_data.db"
+	dbFile = "sensor_data.db"
 	indoorTempURL = "http://192.168.1.4/i_temp"
 )
 
@@ -59,13 +59,19 @@ type StatusResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
+type ESPDataResponse struct {
+	PowerMW      float64 `json:"power_mW"`
+	OutdoorTempC float64 `json:"outdoor_temp_C"`
+	RelayState   string  `json:"relay_state"`
+}
+
 var (
-	serialMutex          sync.Mutex
-	db                   *sql.DB
-	commandChan          = make(chan string)
-	responseChan         = make(chan map[string]interface{})
-	relayEventChan       = make(chan string)
-	serialConnection     serial.Port
+	serialMutex      sync.Mutex
+	db               *sql.DB
+	commandChan      = make(chan string)
+	responseChan     = make(chan map[string]interface{})
+	relayEventChan   = make(chan string)
+	serialConnection serial.Port
 	serialDisconnectChan = make(chan struct{})
 )
 
@@ -93,6 +99,7 @@ func main() {
 	http.HandleFunc("/o/24", handle24hOutdoorTemp)
 	http.HandleFunc("/i/24", handle24hIndoorTemp)
 	http.HandleFunc("/s/24", handle24hSolar)
+	http.HandleFunc("/esp", handleLatestEspData)
 
 	log.Println("Server listening on http://0.0.0.0:5000")
 	if err := http.ListenAndServe("0.0.0.0:5000", nil); err != nil {
@@ -586,4 +593,47 @@ func handle24hSolar(w http.ResponseWriter, r *http.Request) {
 		results = append(results, record)
 	}
 	json.NewEncoder(w).Encode(results)
+}
+
+func handleLatestEspData(w http.ResponseWriter, r *http.Request) {
+	solarData, err := sendSerialCommand("s")
+	if err != nil {
+		http.Error(w, "Failed to get solar power", http.StatusInternalServerError)
+		return
+	}
+	power, okP := solarData["power_mW"].(float64)
+	if !okP {
+		http.Error(w, "Invalid power data from device", http.StatusInternalServerError)
+		return
+	}
+
+	outdoorData, err := sendSerialCommand("o")
+	if err != nil {
+		http.Error(w, "Failed to get outdoor temperature", http.StatusInternalServerError)
+		return
+	}
+	outdoorTemp, okT := outdoorData["value"].(float64)
+	if !okT {
+		http.Error(w, "Invalid temperature data from device", http.StatusInternalServerError)
+		return
+	}
+
+	relayData, err := sendSerialCommand("r")
+	if err != nil {
+		http.Error(w, "Failed to get relay status", http.StatusInternalServerError)
+		return
+	}
+	relayState, okR := relayData["value"].(string)
+	if !okR {
+		http.Error(w, "Invalid relay status from device", http.StatusInternalServerError)
+		return
+	}
+
+	response := ESPDataResponse{
+		PowerMW: power,
+		OutdoorTempC: outdoorTemp,
+		RelayState: relayState,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
